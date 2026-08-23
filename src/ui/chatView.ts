@@ -37,6 +37,10 @@ import { getClaudeDetectedLocalModel, listLocalModels } from '../runtime/localMo
 import type { UpdateService, UpdateState } from '../update/updateService';
 import { RuntimeSetupModal } from './runtimeSetupModal';
 import {
+  resolveEditorSelectionHighlightRange,
+  setEditorSelectionHighlight,
+} from './editorSelectionHighlight';
+import {
   MAX_TOP_LEVEL_INPUT_ATTACHMENTS,
   createExternalInputAttachment,
   deriveSelectedDirectoryPath,
@@ -68,6 +72,8 @@ export interface ChatViewDeps {
 interface ActiveEditorContext {
   file: TFile;
   selection: string;
+  selectionFrom: number;
+  selectionTo: number;
   currentLine: string;
   cursorLine: number;
   cursorCh: number;
@@ -102,6 +108,7 @@ export class WeSightChatView extends ItemView {
   private cancelHintEl: HTMLElement | null = null;
   private activeEditorContext: ActiveEditorContext | null = null;
   private observedMarkdownView: MarkdownView | null = null;
+  private highlightedMarkdownView: MarkdownView | null = null;
   private dismissedContextSignature: string | null = null;
   private configSubmenuEl: HTMLElement | null = null;
   private modelSubmenuEl: HTMLElement | null = null;
@@ -203,6 +210,7 @@ export class WeSightChatView extends ItemView {
 
   override async onClose(): Promise<void> {
     await this.discardPendingInputAttachments();
+    this.clearEditorSelectionHighlight();
     // Submenus live on document.body, so they outlive contentEl unless removed here.
     this.hideConfigSubmenu();
     this.hideHistoryPopover();
@@ -316,6 +324,8 @@ export class WeSightChatView extends ItemView {
     this.updateActiveEditorContext({
       file,
       selection: '',
+      selectionFrom: 0,
+      selectionTo: 0,
       currentLine: '',
       cursorLine: 0,
       cursorCh: 0,
@@ -334,6 +344,8 @@ export class WeSightChatView extends ItemView {
     this.updateActiveEditorContext({
       file,
       selection: editor.getSelection(),
+      selectionFrom: editor.posToOffset(editor.getCursor('from')),
+      selectionTo: editor.posToOffset(editor.getCursor('to')),
       currentLine,
       cursorLine: cursor.line,
       cursorCh: cursor.ch,
@@ -345,9 +357,40 @@ export class WeSightChatView extends ItemView {
     const previousSignature = this.activeEditorContext ? contextSignature(this.activeEditorContext) : '';
     const nextSignature = contextSignature(context);
     this.activeEditorContext = context;
+    this.syncEditorSelectionHighlight();
     if (previousSignature !== nextSignature) {
       this.renderActiveContextChip();
     }
+  }
+
+  private syncEditorSelectionHighlight(): void {
+    const context = this.getVisibleEditorContext();
+    const view = this.observedMarkdownView;
+    const contextMatchesView = Boolean(
+      context
+      && view?.file instanceof TFile
+      && view.file.path === context.file.path,
+    );
+    const range = resolveEditorSelectionHighlightRange(
+      context?.selection ?? '',
+      context?.selectionFrom ?? 0,
+      context?.selectionTo ?? 0,
+      contextMatchesView,
+      this.containerEl.isShown(),
+    );
+
+    if (this.highlightedMarkdownView && this.highlightedMarkdownView !== view) {
+      setEditorSelectionHighlight(this.highlightedMarkdownView.containerEl, null);
+    }
+    const applied = view ? setEditorSelectionHighlight(view.containerEl, range) : false;
+    this.highlightedMarkdownView = range && applied ? view : null;
+  }
+
+  private clearEditorSelectionHighlight(): void {
+    if (this.highlightedMarkdownView) {
+      setEditorSelectionHighlight(this.highlightedMarkdownView.containerEl, null);
+    }
+    this.highlightedMarkdownView = null;
   }
 
   private getVisibleEditorContext(): ActiveEditorContext | null {
@@ -390,6 +433,7 @@ export class WeSightChatView extends ItemView {
     close.onclick = event => {
       event.stopPropagation();
       this.dismissedContextSignature = contextSignature(context);
+      this.syncEditorSelectionHighlight();
       this.renderActiveContextChip();
     };
   }
@@ -2890,6 +2934,8 @@ function contextSignature(context: ActiveEditorContext): string {
   return [
     context.file.path,
     context.selection,
+    context.selectionFrom,
+    context.selectionTo,
     context.currentLine,
     context.cursorLine,
     context.cursorCh,

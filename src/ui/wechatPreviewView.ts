@@ -78,6 +78,7 @@ import { tmpDir } from '../paths';
 import type { UpdateService, UpdateState } from '../update/updateService';
 import { StreamingPreviewAutoFollow } from './streamingPreviewAutoFollow';
 import { promptForWeChatArticleLink } from './wechatArticleLinkModal';
+import { resolveWeChatPreviewRefreshControlState } from './wechatPreviewRefresh';
 
 export const WESIGHT_WECHAT_PREVIEW_VIEW_TYPE = 'wesight-wechat-preview';
 
@@ -115,6 +116,7 @@ export class WeChatPreviewView extends ItemView {
   private digestValue = '';
   private temporaryCover: WeChatAssetDraft | null = null;
   private refreshTimer: number | null = null;
+  private previewRefreshing = false;
   private metadataSaveTimer: number | null = null;
   private activeTab: WeChatPreviewTab = 'preview';
   private themeDocument: WeChatThemeDocument | null = null;
@@ -322,7 +324,7 @@ export class WeChatPreviewView extends ItemView {
   }
 
 
-  private async refreshContent(): Promise<void> {
+  private async refreshContent(reloadOnFailure = true): Promise<void> {
     if (
       !this.file
       || !this.snapshot
@@ -364,8 +366,9 @@ export class WeChatPreviewView extends ItemView {
       const scrollTop = canvasWrap?.scrollTop ?? 0;
       await this.updatePreviewArticle(newSnapshot, scrollTop);
       this.updateToolbarAndSummary(newSnapshot);
-    } catch {
-      return this.reload();
+    } catch (error) {
+      if (reloadOnFailure) return this.reload();
+      throw error;
     }
   }
 
@@ -532,25 +535,6 @@ export class WeChatPreviewView extends ItemView {
     brand.createEl('h4', { text: 'WeSight', cls: 'wesight-wechat-preview-brand-text' });
 
     const actions = header.createDiv({ cls: 'wesight-wechat-preview-header-actions' });
-    if (this.activeTab !== 'monitoring') {
-      const refresh = actions.createEl('button', {
-        cls: 'clickable-icon wesight-header-btn',
-        attr: {
-          type: 'button',
-          'aria-label': this.themeGenerationController ? '停止公众号主题生成' : '刷新公众号排版',
-        },
-      });
-      setIcon(refresh, this.themeGenerationController ? 'square' : 'refresh-cw');
-      refresh.toggleClass('is-stop', Boolean(this.themeGenerationController));
-      refresh.disabled = this.loading
-        || this.themeGenerationStopping
-        || (Boolean(this.operation) && !this.themeGenerationController);
-      refresh.onclick = () => {
-        if (this.themeGenerationController) this.stopThemeGeneration();
-        else void this.refreshPreview();
-      };
-    }
-
     this.renderAccountControl(actions);
   }
 
@@ -1501,10 +1485,19 @@ export class WeChatPreviewView extends ItemView {
 
   private renderPreviewSummary(parent: HTMLElement, snapshot: WeChatPreviewSnapshot): void {
     const summary = parent.createDiv({ cls: 'wesight-wechat-preview-summary' });
-    const connection = summary.createDiv();
+    const connection = summary.createDiv({ cls: 'wesight-wechat-preview-connection' });
     connection.createSpan({ cls: 'wesight-wechat-connected-dot' });
     connection.createSpan({ text: `已连接 · ${this.file?.basename ?? snapshot.title}` });
+
+    const refresh = summary.createEl('button', {
+      cls: 'clickable-icon wesight-wechat-preview-refresh',
+      attr: { type: 'button' },
+    });
+    this.renderPreviewRefreshControl(refresh);
+    refresh.onclick = () => void this.refreshPreview();
+
     const check = summary.createEl('button', {
+      cls: 'wesight-wechat-preview-check',
       attr: { type: 'button' },
       text: snapshot.warnings.length ? `检查 ${snapshot.warnings.length} 项` : '发布检查通过',
     });
@@ -1878,17 +1871,44 @@ export class WeChatPreviewView extends ItemView {
   }
 
   private async refreshPreview(): Promise<void> {
-    await this.reload();
-    if (!this.snapshot) return;
-    const themeId = this.currentThemeId();
-    const theme = getWeChatTheme(themeId);
-    if (theme.kind !== 'template') {
-      if (theme.kind === 'custom' && !this.customThemePreferences().description) {
-        await this.configureCustomTheme();
-      } else {
-        await this.generateTheme(themeId, true);
-      }
+    const blocked = Boolean(this.operation) || Boolean(this.themeGenerationController);
+    if (this.previewRefreshing || blocked) return;
+
+    this.previewRefreshing = true;
+    this.updatePreviewRefreshControl();
+    try {
+      await this.refreshContent(false);
+      if (this.error) throw new Error(this.error);
+      new Notice('预览已刷新。');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '刷新失败';
+      new Notice(`刷新失败：${message}`);
+    } finally {
+      this.previewRefreshing = false;
+      this.updatePreviewRefreshControl();
     }
+  }
+
+  private renderPreviewRefreshControl(button: HTMLButtonElement): void {
+    const state = resolveWeChatPreviewRefreshControlState(
+      this.previewRefreshing,
+      Boolean(this.operation) || Boolean(this.themeGenerationController),
+    );
+    button.empty();
+    const icon = button.createSpan();
+    setIcon(icon, state.icon);
+    button.disabled = state.disabled;
+    button.toggleClass('is-loading', state.loading);
+    button.setAttribute('aria-label', state.label);
+    button.setAttribute('aria-busy', String(state.loading));
+    button.setAttribute('title', state.label);
+  }
+
+  private updatePreviewRefreshControl(): void {
+    const button = this.contentEl.querySelector<HTMLButtonElement>(
+      '.wesight-wechat-preview-refresh',
+    );
+    if (button) this.renderPreviewRefreshControl(button);
   }
 
   private async selectTheme(themeId: WeChatThemeId): Promise<void> {

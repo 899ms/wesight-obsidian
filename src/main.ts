@@ -20,6 +20,7 @@ import { VaultStore } from './storage/vaultStore';
 import { RuntimeManager } from './runtime/runtimeManager';
 import { runInlineEdit } from './ui/inlineEdit';
 import { WeSightChatView, WESIGHT_VIEW_TYPE } from './ui/chatView';
+import { editorSelectionHighlightExtension } from './ui/editorSelectionHighlight';
 import { WeSightSettingTab } from './ui/settingsTab';
 import { CloudAuthService } from './share/cloudAuth';
 import { ShareCloudApi } from './share/cloudApi';
@@ -126,6 +127,7 @@ export default class WeSightPlugin extends Plugin {
       entitlement: this.knowledgeBrainEntitlement,
     });
     await this.knowledgeBrain.cleanup();
+    this.registerEditorExtension(editorSelectionHighlightExtension);
 
     this.registerObsidianProtocolHandler('wesight-auth', params => {
       void this.handleCloudAuthCallback(params.code ?? '');
