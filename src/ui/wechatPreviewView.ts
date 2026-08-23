@@ -75,10 +75,14 @@ import { promptForWeChatCover } from './generateWeChatCoverModal';
 import { createId } from '../utils/id';
 import { ensureDir, safeRemoveDir } from '../utils/fs';
 import { tmpDir } from '../paths';
+import type { UpdateService, UpdateState } from '../update/updateService';
 import { StreamingPreviewAutoFollow } from './streamingPreviewAutoFollow';
 import { promptForWeChatArticleLink } from './wechatArticleLinkModal';
 
 export const WESIGHT_WECHAT_PREVIEW_VIEW_TYPE = 'wesight-wechat-preview';
+
+const WESIGHT_TUTORIAL_URL =
+  'https://my.feishu.cn/docx/Vy7wdUzhkoZpPhxgix4cYHELnie?from=from_copylink';
 
 type WeChatPreviewTab = 'preview' | 'settings' | 'monitoring';
 
@@ -88,6 +92,7 @@ interface WeChatPreviewViewOptions {
   themeService: WeChatThemeService;
   templateThemeService: TemplateThemeService;
   runtimeManager: RuntimeManager;
+  updateService: UpdateService;
   getSettings: () => WeSightObsidianSettings;
   saveSettings: () => Promise<void>;
   openSettings: () => void;
@@ -632,6 +637,8 @@ export class WeChatPreviewView extends ItemView {
       .setIcon('gem')
       .setIsLabel(true));
     menu.addSeparator();
+    this.addUpdateMenuItem(menu);
+    menu.addSeparator();
     menu.addItem(item => item
       .setTitle('账户详情')
       .setIcon('circle-user-round')
@@ -646,6 +653,11 @@ export class WeChatPreviewView extends ItemView {
       .setTitle('会员与积分')
       .setIcon('wallet-cards')
       .onClick(() => this.options.auth.openBilling()));
+    menu.addItem(item => item
+      .setTitle('使用教程')
+      .setIcon('book-open')
+      .onClick(() => window.open(WESIGHT_TUTORIAL_URL, '_blank', 'noopener,noreferrer')));
+    menu.addSeparator();
     menu.addItem(item => item
       .setTitle('退出登录')
       .setIcon('log-out')
@@ -664,6 +676,62 @@ export class WeChatPreviewView extends ItemView {
       width: accountMenuWidth,
     });
     this.accountMenu = menu;
+  }
+
+  private addUpdateMenuItem(menu: Menu): void {
+    const state = this.options.updateService.getState();
+    if (state.status === 'checking') {
+      menu.addItem(item => item
+        .setTitle('正在检查更新…')
+        .setIcon('refresh-cw')
+        .setDisabled(true));
+      return;
+    }
+    if (state.status === 'available') {
+      menu.addItem(item => item
+        .setTitle(`发现新版本 ${state.latestVersion ?? ''}`)
+        .setIcon('download')
+        .onClick(() => this.options.updateService.openOfficialUpdatePage()));
+      return;
+    }
+    if (state.status === 'incompatible') {
+      menu.addItem(item => item
+        .setTitle(`新版本 ${state.latestVersion ?? ''} 需要 Obsidian ${state.minAppVersion ?? '更高版本'}`)
+        .setIcon('triangle-alert')
+        .onClick(() => this.handleKnownUpdate(state)));
+      return;
+    }
+    menu.addItem(item => item
+      .setTitle('检查更新')
+      .setIcon('refresh-cw')
+      .onClick(() => void this.checkForUpdatesManually()));
+  }
+
+  private async checkForUpdatesManually(): Promise<void> {
+    try {
+      const state = await this.options.updateService.checkForUpdates();
+      if (state.status === 'available') {
+        this.options.updateService.openOfficialUpdatePage();
+        return;
+      }
+      if (state.status === 'incompatible') {
+        this.handleKnownUpdate(state);
+        return;
+      }
+      new Notice(`当前已是最新版本 ${state.currentVersion}。`);
+    } catch (error) {
+      new Notice(error instanceof Error ? error.message : `检查更新失败：${String(error)}`);
+    }
+  }
+
+  private handleKnownUpdate(state: Readonly<UpdateState>): void {
+    if (state.status === 'incompatible') {
+      new Notice(
+        `WeSight ${state.latestVersion ?? '新版本'} 需要 Obsidian ${state.minAppVersion ?? '更高版本'} 或更高版本。`,
+      );
+      return;
+    }
+    this.options.updateService.openOfficialUpdatePage();
   }
 
   private renderLogin(parent: HTMLElement): void {

@@ -164,6 +164,7 @@ export default class WeSightPlugin extends Plugin {
         themeService: this.wechatThemeService,
         templateThemeService: this.wechatTemplateThemeService,
         runtimeManager: this.runtimeManager,
+        updateService: this.updateService,
         getSettings: () => this.settings,
         saveSettings: () => this.saveSettings(),
         openSettings: () => this.openSettings('general'),
