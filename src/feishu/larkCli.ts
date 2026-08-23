@@ -550,7 +550,7 @@ export class LarkCliService extends EventEmitter {
 
   private async inspectConnectionState(
     verifyCapabilities: boolean,
-    requireAuthorizationRecord: boolean,
+    recoverAuthorizationRecord: boolean,
   ): Promise<FeishuConnectionState> {
     const discovered = this.discoverCli();
     if (!discovered.path) {
@@ -635,8 +635,7 @@ export class LarkCliService extends EventEmitter {
         throw new LarkCliError('飞书 CLI 未返回应用权限清单，请重新检测。', null);
       }
       const permissionsComplete = missingLarkScopes(appScopes, grantedScopes).length === 0;
-      const hasAuthorizationRecord = Boolean(authorizationRecord);
-      if (!permissionsComplete || (requireAuthorizationRecord && !hasAuthorizationRecord)) {
+      if (!permissionsComplete) {
         return {
           status: 'needs-auth',
           cliPath: discovered.path,
@@ -652,9 +651,7 @@ export class LarkCliService extends EventEmitter {
           tenantName: null,
           capabilities,
           consoleUrl: null,
-          message: permissionsComplete
-            ? '此电脑需要通过 WeSight 完成一次全部权限授权。'
-            : '授权范围不完整，请重新扫码并勾选全部权限。',
+          message: '授权范围不完整，请重新扫码并勾选全部权限。',
         };
       }
 
@@ -665,6 +662,20 @@ export class LarkCliService extends EventEmitter {
       const allGranted = Object.values(verifiedCapabilities).every(capability => (
         capability.granted && (!verifyCapabilities || capability.verified)
       ));
+      let effectiveAuthorizationRecord = authorizationRecord;
+      if (allGranted && recoverAuthorizationRecord && !effectiveAuthorizationRecord) {
+        effectiveAuthorizationRecord = {
+          authorizationMode: LARK_AUTHORIZATION_MODE,
+          scopeVersion: LARK_SCOPE_VERSION,
+          cliVersion: discovered.version,
+          authorizedAt: new Date().toISOString(),
+        };
+        writeJsonFile(
+          larkCliAuthorizationRecordPath(this.env),
+          effectiveAuthorizationRecord,
+          0o600,
+        );
+      }
       return {
         status: allGranted ? 'connected' : 'needs-auth',
         cliPath: discovered.path,
@@ -672,10 +683,10 @@ export class LarkCliService extends EventEmitter {
         cliStatus: discovered.cliStatus,
         configured: true,
         connected: allGranted,
-        authorizationMode: authorizationRecord?.authorizationMode
-          ?? (requireAuthorizationRecord ? null : LARK_AUTHORIZATION_MODE),
+        authorizationMode: effectiveAuthorizationRecord?.authorizationMode
+          ?? (recoverAuthorizationRecord ? null : LARK_AUTHORIZATION_MODE),
         permissionsComplete,
-        authorizedAt: authorizationRecord?.authorizedAt ?? null,
+        authorizedAt: effectiveAuthorizationRecord?.authorizedAt ?? null,
         accountName: user?.userName ?? '飞书用户',
         accountOpenId: user?.openId ?? null,
         tenantName: null,

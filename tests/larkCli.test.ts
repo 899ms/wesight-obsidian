@@ -79,7 +79,7 @@ describe('LarkCliService commands', () => {
     });
   });
 
-  test('requires a local all-mode record before reusing an existing full authorization', async () => {
+  test('recovers an existing full authorization when the local record is missing', async () => {
     const env = createSystemCliFixture(tempDirs);
     const cli = new LarkCliService(env);
     const grantedScopes = [
@@ -104,25 +104,31 @@ describe('LarkCliService commands', () => {
 
     const beforeRecord = await cli.getConnectionState();
     expect(beforeRecord).toMatchObject({
-      status: 'needs-auth',
-      connected: false,
+      status: 'connected',
+      connected: true,
       permissionsComplete: true,
-      authorizationMode: null,
+      authorizationMode: 'all',
     });
+    expect(beforeRecord.authorizedAt).toEqual(expect.any(String));
 
-    fs.writeFileSync(larkCliAuthorizationRecordPath(env), JSON.stringify({
+    const recoveredRecord: unknown = JSON.parse(
+      fs.readFileSync(larkCliAuthorizationRecordPath(env), 'utf8'),
+    );
+    expect(isValidLarkAuthorizationRecord(recoveredRecord)).toBe(true);
+    expect(recoveredRecord).toMatchObject({
       authorizationMode: 'all',
       scopeVersion: 1,
-      cliVersion: '9.9.9',
-      authorizedAt: '2026-07-30T08:00:00.000Z',
-    }));
+      cliVersion: beforeRecord.cliVersion,
+      authorizedAt: beforeRecord.authorizedAt,
+    });
+
     const afterRecord = await cli.getConnectionState();
     expect(afterRecord).toMatchObject({
       status: 'connected',
       connected: true,
       permissionsComplete: true,
       authorizationMode: 'all',
-      authorizedAt: '2026-07-30T08:00:00.000Z',
+      authorizedAt: beforeRecord.authorizedAt,
     });
   });
 
