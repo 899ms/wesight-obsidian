@@ -9,7 +9,8 @@ import { openBillingModal } from './billingModal';
 import { CloudApiError } from '../share/cloudApi';
 import type { CloudBillingSummary } from '../share/types';
 import { chargeWeChatTitleGeneration } from '../wechat/titleGeneration';
-import { CANGHE_TITLE_SKILL_PROMPT } from '../wechat/bundledCangheTitle';
+import { resolveWeChatTitleSystemPrompt } from '../wechat/bundledCangheTitle';
+import { buildTitleGenerationPrompt } from '../wechat/titleGenerationPrompt';
 import { createId } from '../utils/id';
 import { ensureDir, safeRemoveDir } from '../utils/fs';
 import { tmpDir } from '../paths';
@@ -30,8 +31,6 @@ export function promptForWeChatTitles(
     new GenerateWeChatTitlesModal(app, options, resolve).open();
   });
 }
-
-const MAX_CONTEXT_CHARS = 6000;
 
 class GenerateWeChatTitlesModal extends Modal {
   private requirement = '';
@@ -84,7 +83,7 @@ class GenerateWeChatTitlesModal extends Modal {
 
     new Setting(contentEl)
       .setName('使用苍何同款爆款标题')
-      .setDesc('按苍何本人爆款标题风格生成（消耗 1 积分）')
+      .setDesc('按苍何本人风格生成，至少 3 个候选包含贴合正文的情绪钩子（消耗 1 积分）')
       .addToggle(toggle => {
         toggle.setValue(this.useCangheSkill);
         toggle.onChange(value => {
@@ -198,14 +197,18 @@ class GenerateWeChatTitlesModal extends Modal {
       await this.options.runtimeManager.runTurn({
         conversationId: createId('wechat-title'),
         agentId,
-        prompt: buildTitleGenerationPrompt(this.options.snapshot, this.requirement),
+        prompt: buildTitleGenerationPrompt(
+          this.options.snapshot,
+          this.requirement,
+          this.useCangheSkill,
+        ),
         cwd: runDir,
         configSource: settings.configSources[agentId],
         providerProfileId: settings.providerProfileByAgent[agentId] || undefined,
         model: settings.localModelByAgent[agentId] || undefined,
         planMode: false,
         textOnly: true,
-        systemPrompt: this.useCangheSkill ? CANGHE_TITLE_SKILL_PROMPT : undefined,
+        systemPrompt: resolveWeChatTitleSystemPrompt(this.useCangheSkill),
         signal: controller.signal,
       }, event => {
         if (event.type === 'text') {
@@ -239,42 +242,6 @@ class GenerateWeChatTitlesModal extends Modal {
       if (this.contentEl.isConnected) this.render();
     }
   }
-}
-
-function buildTitleGenerationPrompt(snapshot: WeChatPreviewSnapshot, requirement: string): string {
-  const currentTitle = snapshot.title.trim();
-  const currentDigest = snapshot.digest.trim();
-  let article = snapshot.markdown.trim();
-  let truncated = false;
-  if (article.length > MAX_CONTEXT_CHARS) {
-    article = article.slice(0, MAX_CONTEXT_CHARS);
-    truncated = true;
-  }
-
-  const sections: string[] = [
-    '你是微信公众号爆款标题专家。请根据下面提供的文章内容，生成 5 个适合公众号传播的爆款标题。',
-    '要求：',
-    '- 只输出一个 JSON 数组，不要解释、不要代码围栏。',
-    '- 数组长度必须恰好 5 个字符串。',
-    '- 每个标题长度控制在 30 字以内，口语化、有传播力，避免夸张虚假宣传。',
-  ];
-  if (currentTitle) {
-    sections.push(`当前标题（可作为参考）：${currentTitle}`);
-  }
-  if (currentDigest) {
-    sections.push(`当前摘要（可作为参考）：${currentDigest}`);
-  }
-  if (requirement.trim()) {
-    sections.push(`额外要求：${requirement.trim()}`);
-  }
-  sections.push('===== 文章内容 START =====');
-  sections.push(article);
-  if (truncated) {
-    sections.push('（后文已省略）');
-  }
-  sections.push('===== 文章内容 END =====');
-  sections.push('请输出 JSON 数组，例如：["标题1", "标题2", "标题3", "标题4", "标题5"]');
-  return sections.join('\n');
 }
 
 function parseTitleSuggestions(output: string): string[] | null {

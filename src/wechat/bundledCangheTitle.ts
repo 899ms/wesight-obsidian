@@ -8,3 +8,9 @@ export const CANGHE_TITLE_SKILL_PROMPT = [
   '',
   titlePatterns,
 ].join('\n');
+
+export function resolveWeChatTitleSystemPrompt(
+  useCangheStyle: boolean,
+): string | undefined {
+  return useCangheStyle ? CANGHE_TITLE_SKILL_PROMPT : undefined;
+}
