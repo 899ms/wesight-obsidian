@@ -1313,9 +1313,26 @@ export class WeChatPreviewView extends ItemView {
       this.closeThemeMenus();
       void this.configureCustomTheme();
     };
+    const focusCustomTheme = (): void => {
+      this.cancelThemeMenuHide();
+      this.closeThemeSubmenu();
+    };
+    ai.addEventListener('mouseenter', focusCustomTheme);
+    ai.onfocus = focusCustomTheme;
     ai.onclick = openCustomTheme;
     ai.onkeydown = aiEvent => {
-      if (aiEvent.key === 'Enter' || aiEvent.key === ' ') openCustomTheme(aiEvent);
+      if (aiEvent.key === 'Enter' || aiEvent.key === ' ') {
+        aiEvent.preventDefault();
+        openCustomTheme(aiEvent);
+      }
+      if (aiEvent.key === 'ArrowUp') {
+        aiEvent.preventDefault();
+        (ai.previousElementSibling as HTMLElement | null)?.focus();
+      }
+      if (aiEvent.key === 'ArrowDown') {
+        aiEvent.preventDefault();
+        menu.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+      }
       if (aiEvent.key === 'Escape') this.closeThemeMenus();
     };
 
@@ -1345,7 +1362,6 @@ export class WeChatPreviewView extends ItemView {
       this.showThemeSubmenu(kind, item);
     };
     item.addEventListener('mouseenter', open);
-    item.addEventListener('mouseleave', () => this.scheduleThemeMenuHide());
     item.onclick = open;
     item.onfocus = () => this.showThemeSubmenu(kind, item);
     item.onkeydown = itemEvent => {
@@ -1368,11 +1384,7 @@ export class WeChatPreviewView extends ItemView {
 
   private showThemeSubmenu(kind: WeChatThemeKind, trigger: HTMLElement): void {
     this.cancelThemeMenuHide();
-    this.themeSubmenuEl?.remove();
-    this.themeSubmenuEl = null;
-    for (const item of Array.from(this.themeMenuEl?.querySelectorAll('.is-active') ?? [])) {
-      item.removeClass('is-active');
-    }
+    this.closeThemeSubmenu();
     trigger.addClass('is-active');
 
     const submenu = createDiv({ cls: 'wesight-wechat-theme-submenu' });
@@ -1421,6 +1433,14 @@ export class WeChatPreviewView extends ItemView {
     this.positionThemeMenu(submenu, trigger.getBoundingClientRect(), 'side');
   }
 
+  private closeThemeSubmenu(): void {
+    this.themeSubmenuEl?.remove();
+    this.themeSubmenuEl = null;
+    for (const item of Array.from(this.themeMenuEl?.querySelectorAll('.is-active') ?? [])) {
+      item.removeClass('is-active');
+    }
+  }
+
   private positionThemeMenu(
     menu: HTMLElement,
     trigger: DOMRect,
@@ -1453,9 +1473,8 @@ export class WeChatPreviewView extends ItemView {
 
   private closeThemeMenus(): void {
     this.cancelThemeMenuHide();
-    this.themeSubmenuEl?.remove();
+    this.closeThemeSubmenu();
     this.themeMenuEl?.remove();
-    this.themeSubmenuEl = null;
     this.themeMenuEl = null;
     this.contentEl.querySelector('.wesight-wechat-theme-trigger')?.setAttribute('aria-expanded', 'false');
   }
