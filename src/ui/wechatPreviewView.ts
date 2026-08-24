@@ -78,7 +78,12 @@ import { tmpDir } from '../paths';
 import type { UpdateService, UpdateState } from '../update/updateService';
 import { StreamingPreviewAutoFollow } from './streamingPreviewAutoFollow';
 import { promptForWeChatArticleLink } from './wechatArticleLinkModal';
-import { resolveWeChatPreviewRefreshControlState } from './wechatPreviewRefresh';
+import {
+  resolveWeChatPreviewRefreshControlState,
+  resolveWeChatPreviewSourcePath,
+  WeChatPreviewRequestCoordinator,
+  type WeChatPreviewRequest,
+} from './wechatPreviewRefresh';
 
 export const WESIGHT_WECHAT_PREVIEW_VIEW_TYPE = 'wesight-wechat-preview';
 
@@ -116,7 +121,11 @@ export class WeChatPreviewView extends ItemView {
   private digestValue = '';
   private temporaryCover: WeChatAssetDraft | null = null;
   private refreshTimer: number | null = null;
+  private fileOpenSyncTimer: number | null = null;
   private previewRefreshing = false;
+  private lastActiveMarkdownFile: TFile | null = null;
+  private readonly fileSwitchRequests = new WeChatPreviewRequestCoordinator();
+  private readonly previewLoadRequests = new WeChatPreviewRequestCoordinator();
   private metadataSaveTimer: number | null = null;
   private activeTab: WeChatPreviewTab = 'preview';
   private themeDocument: WeChatThemeDocument | null = null;
@@ -180,8 +189,18 @@ export class WeChatPreviewView extends ItemView {
     this.register(this.options.auth.onChange(() => {
       void this.reload();
     }));
+    this.registerEvent(this.app.workspace.on('active-leaf-change', (leaf) => {
+      const file = leaf?.view instanceof MarkdownView ? leaf.view.file : null;
+      if (file?.extension === 'md') this.followActiveMarkdownFile(file);
+    }));
     this.registerEvent(this.app.workspace.on('file-open', (file) => {
-      if (file?.extension === 'md') void this.setFile(file);
+      if (file?.extension !== 'md') return;
+      if (this.fileOpenSyncTimer !== null) window.clearTimeout(this.fileOpenSyncTimer);
+      this.fileOpenSyncTimer = window.setTimeout(() => {
+        this.fileOpenSyncTimer = null;
+        const active = this.app.workspace.getActiveViewOfType(MarkdownView)?.file;
+        if (active?.extension === 'md') this.followActiveMarkdownFile(active);
+      }, 0);
     }));
     this.registerEvent(this.app.vault.on('modify', (file) => {
       if (!(file instanceof TFile) || file.path !== this.file?.path) return;
@@ -191,9 +210,11 @@ export class WeChatPreviewView extends ItemView {
         void this.refreshContent();
       }, 450);
     }));
-    if (!this.file) {
-      const active = this.app.workspace.getActiveViewOfType(MarkdownView)?.file;
-      if (active) this.file = active;
+    const active = this.app.workspace.getActiveViewOfType(MarkdownView)?.file
+      ?? this.markdownFile(this.app.workspace.getActiveFile());
+    if (active) {
+      this.lastActiveMarkdownFile = active;
+      this.file = active;
     }
     await this.reload();
     this.warmUpCodexRuntime();
@@ -201,9 +222,13 @@ export class WeChatPreviewView extends ItemView {
 
   override async onClose(): Promise<void> {
     this.articleStatsRequestId += 1;
+    this.fileSwitchRequests.invalidate();
+    this.previewLoadRequests.invalidate();
     this.invalidateThemeGeneration();
     if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
+    if (this.fileOpenSyncTimer !== null) window.clearTimeout(this.fileOpenSyncTimer);
+    this.fileOpenSyncTimer = null;
     this.flushSaveMetadata();
     this.closeThemeMenus();
     this.clearTemporaryCover();
@@ -231,24 +256,75 @@ export class WeChatPreviewView extends ItemView {
     if (this.contentEl.isConnected) await this.reload();
   }
 
+  private markdownFile(file: TFile | null): TFile | null {
+    return file?.extension === 'md' ? file : null;
+  }
+
+  private followActiveMarkdownFile(file: TFile): void {
+    this.lastActiveMarkdownFile = file;
+    void this.setFile(file);
+  }
+
+  private resolvePreviewSourceFile(): TFile | null {
+    const activeMarkdown = this.markdownFile(
+      this.app.workspace.getActiveViewOfType(MarkdownView)?.file ?? null,
+    );
+    const recentFile = this.markdownFile(this.app.workspace.getActiveFile());
+    let lastActive: TFile | null = null;
+    if (this.lastActiveMarkdownFile) {
+      const candidate = this.app.vault.getAbstractFileByPath(this.lastActiveMarkdownFile.path);
+      if (candidate instanceof TFile) lastActive = this.markdownFile(candidate);
+    }
+    const sourcePath = resolveWeChatPreviewSourcePath(
+      activeMarkdown?.path ?? null,
+      recentFile?.path ?? null,
+      lastActive?.path ?? null,
+      this.file?.path ?? null,
+    );
+    if (!sourcePath) return null;
+    const source = this.app.vault.getAbstractFileByPath(sourcePath);
+    return source instanceof TFile ? this.markdownFile(source) : null;
+  }
+
+  private isCurrentPreviewLoad(
+    request: WeChatPreviewRequest,
+    targetFile: TFile | null,
+  ): boolean {
+    const targetPath = targetFile?.path ?? null;
+    return this.previewLoadRequests.isCurrent(request)
+      && request.sourcePath === targetPath
+      && (this.file?.path ?? null) === targetPath;
+  }
+
   async setFile(file: TFile): Promise<void> {
-    if (this.file?.path === file.path && this.snapshot) return;
-    this.invalidateThemeGeneration();
-    this.articleStatsRequestId += 1;
-    this.file = file;
-    this.articleUrl = '';
-    this.articleStats = null;
-    this.articleStatsError = null;
-    this.articleStatsLoading = false;
-    this.articleStatsUpdatedAt = null;
-    this.clearTemporaryCover();
-    this.acknowledgedWarnings = false;
-    await this.leaf.setViewState({
-      type: WESIGHT_WECHAT_PREVIEW_VIEW_TYPE,
-      active: true,
-      state: { filePath: file.path },
-    });
-    await this.reload();
+    if (file.extension !== 'md') return;
+    this.lastActiveMarkdownFile = file;
+    const alreadyLoaded = this.file?.path === file.path
+      && this.snapshot?.sourcePath === file.path;
+    if (alreadyLoaded || this.fileSwitchRequests.isPending(file.path)) return;
+
+    const request = this.fileSwitchRequests.begin(file.path);
+    try {
+      if (this.file?.path !== file.path) await this.flushSaveMetadataNow();
+      if (!this.fileSwitchRequests.isCurrent(request)) return;
+
+      this.invalidateThemeGeneration();
+      this.articleStatsRequestId += 1;
+      if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+      this.file = file;
+      this.activeTab = 'preview';
+      this.articleUrl = '';
+      this.articleStats = null;
+      this.articleStatsError = null;
+      this.articleStatsLoading = false;
+      this.articleStatsUpdatedAt = null;
+      this.clearTemporaryCover();
+      this.acknowledgedWarnings = false;
+      await this.reload();
+    } finally {
+      this.fileSwitchRequests.finish(request);
+    }
   }
 
   async showDataMonitoring(file: TFile): Promise<void> {
@@ -262,6 +338,19 @@ export class WeChatPreviewView extends ItemView {
   }
 
   private async reload(): Promise<void> {
+    const targetFile = this.file;
+    const request = this.previewLoadRequests.begin(targetFile?.path ?? null);
+    try {
+      await this.performReload(request, targetFile);
+    } finally {
+      this.previewLoadRequests.finish(request);
+    }
+  }
+
+  private async performReload(
+    request: WeChatPreviewRequest,
+    targetFile: TFile | null,
+  ): Promise<void> {
     this.invalidateThemeGeneration();
     this.loading = true;
     this.error = null;
@@ -271,25 +360,30 @@ export class WeChatPreviewView extends ItemView {
     this.render();
     try {
       const user = await this.options.auth.restoreSession();
-      if (!user || !this.file) {
+      if (!this.isCurrentPreviewLoad(request, targetFile)) return;
+      if (!user || !targetFile) {
         this.connection = null;
         this.snapshot = null;
         this.draft = null;
         return;
       }
-      this.connection = await this.options.api.getConnection();
-      if (!this.connection) {
+      const connection = await this.options.api.getConnection();
+      if (!this.isCurrentPreviewLoad(request, targetFile)) return;
+      this.connection = connection;
+      if (!connection) {
         this.snapshot = null;
         this.draft = null;
         return;
       }
       const previousSnapshot = this.snapshot;
-      this.snapshot = await buildWeChatSnapshot(this.app, this.file);
+      const snapshot = await buildWeChatSnapshot(this.app, targetFile);
+      if (!this.isCurrentPreviewLoad(request, targetFile)) return;
+      this.snapshot = snapshot;
       this.readArticleUrl();
-      this.applySnapshotMetadata(this.snapshot, previousSnapshot);
-      this.loadCachedThemeDocument(this.snapshot);
+      this.applySnapshotMetadata(snapshot, previousSnapshot);
+      this.loadCachedThemeDocument(snapshot);
       const publishState = parseWeChatPublishState(
-        this.app.metadataCache.getFileCache(this.file)?.frontmatter,
+        this.app.metadataCache.getFileCache(targetFile)?.frontmatter,
       );
       this.duplicatePath = publishState
         ? this.findDuplicatePath(publishState.draftId)
@@ -297,8 +391,11 @@ export class WeChatPreviewView extends ItemView {
       this.draft = null;
       if (publishState && !this.duplicatePath) {
         try {
-          this.draft = await this.options.api.getDraft(publishState.draftId);
+          const draft = await this.options.api.getDraft(publishState.draftId);
+          if (!this.isCurrentPreviewLoad(request, targetFile)) return;
+          this.draft = draft;
         } catch (error) {
+          if (!this.isCurrentPreviewLoad(request, targetFile)) return;
           if (error instanceof CloudApiError && error.status === 404) {
             this.staleDraft = true;
           } else {
@@ -307,18 +404,21 @@ export class WeChatPreviewView extends ItemView {
         }
       }
     } catch (error) {
+      if (!this.isCurrentPreviewLoad(request, targetFile)) return;
       this.error = error instanceof Error ? error.message : '公众号预览加载失败';
     } finally {
-      this.loading = false;
-      this.render();
-      if (
-        this.activeTab === 'monitoring'
-        && this.articleUrl
-        && !this.articleStats
-        && !this.articleStatsLoading
-        && !this.error
-      ) {
-        void this.refreshArticleStats();
+      if (this.isCurrentPreviewLoad(request, targetFile)) {
+        this.loading = false;
+        this.render();
+        if (
+          this.activeTab === 'monitoring'
+          && this.articleUrl
+          && !this.articleStats
+          && !this.articleStatsLoading
+          && !this.error
+        ) {
+          void this.refreshArticleStats();
+        }
       }
     }
   }
@@ -333,9 +433,12 @@ export class WeChatPreviewView extends ItemView {
     ) {
       return this.reload();
     }
+    const targetFile = this.file;
+    const request = this.previewLoadRequests.begin(targetFile.path);
     try {
       const previousSnapshot = this.snapshot;
-      const newSnapshot = await buildWeChatSnapshot(this.app, this.file);
+      const newSnapshot = await buildWeChatSnapshot(this.app, targetFile);
+      if (!this.isCurrentPreviewLoad(request, targetFile)) return;
       this.snapshot = newSnapshot;
       this.applySnapshotMetadata(newSnapshot, previousSnapshot);
       if (!this.validThemeDocument(newSnapshot)) {
@@ -364,17 +467,26 @@ export class WeChatPreviewView extends ItemView {
         '.wesight-wechat-preview-canvas-wrap',
       );
       const scrollTop = canvasWrap?.scrollTop ?? 0;
-      await this.updatePreviewArticle(newSnapshot, scrollTop);
+      await this.updatePreviewArticle(
+        newSnapshot,
+        scrollTop,
+        () => this.isCurrentPreviewLoad(request, targetFile),
+      );
+      if (!this.isCurrentPreviewLoad(request, targetFile)) return;
       this.updateToolbarAndSummary(newSnapshot);
     } catch (error) {
+      if (!this.isCurrentPreviewLoad(request, targetFile)) return;
       if (reloadOnFailure) return this.reload();
       throw error;
+    } finally {
+      this.previewLoadRequests.finish(request);
     }
   }
 
   private async updatePreviewArticle(
     snapshot: WeChatPreviewSnapshot,
     preserveScrollTop: number,
+    isCurrent: () => boolean = () => true,
   ): Promise<void> {
     const canvasWrap = this.contentEl.querySelector<HTMLElement>(
       '.wesight-wechat-preview-canvas-wrap',
@@ -405,6 +517,10 @@ export class WeChatPreviewView extends ItemView {
         themeDocument: this.validThemeDocument(prepared),
         templateTheme: this.currentTemplateTheme(),
       });
+      if (!isCurrent()) {
+        newArticle.remove();
+        return;
+      }
       if (oldArticle?.isConnected) {
         oldArticle.replaceWith(newArticle);
       }
@@ -823,6 +939,10 @@ export class WeChatPreviewView extends ItemView {
     })
       .then(() => this.restorePreviewScroll(canvasWrap))
       .catch((error) => {
+        if (
+          this.file?.path !== snapshot.sourcePath
+          || this.snapshot?.sourcePath !== snapshot.sourcePath
+        ) return;
         this.error = error instanceof Error ? error.message : '排版渲染失败';
         this.render();
       });
@@ -1833,18 +1953,24 @@ export class WeChatPreviewView extends ItemView {
   }
 
   private flushSaveMetadata(): void {
+    void this.flushSaveMetadataNow();
+  }
+
+  private async flushSaveMetadataNow(): Promise<void> {
     if (this.metadataSaveTimer === null) return;
     window.clearTimeout(this.metadataSaveTimer);
     this.metadataSaveTimer = null;
-    void this.savePublishingMetadata();
+    await this.savePublishingMetadata();
   }
 
   private async savePublishingMetadata(): Promise<void> {
     if (!this.file || !this.snapshot) return;
+    const file = this.file;
+    if (this.snapshot.sourcePath !== file.path) return;
     const title = this.titleValue.trim();
     const author = this.authorValue.trim();
     const digest = this.digestValue.trim();
-    const frontmatter = this.app.metadataCache.getFileCache(this.file)?.frontmatter;
+    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
     const currentTitle = typeof frontmatter?.title === 'string' ? frontmatter.title.trim() : '';
     const currentAuthor = typeof frontmatter?.author === 'string' ? frontmatter.author.trim() : '';
     const currentDigest = typeof frontmatter?.digest === 'string' ? frontmatter.digest.trim() : '';
@@ -1853,7 +1979,7 @@ export class WeChatPreviewView extends ItemView {
       && author === currentAuthor
       && digest === currentDigest
     ) return;
-    await this.app.fileManager.processFrontMatter(this.file, (fm: Record<string, unknown>) => {
+    await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
       if (title) fm.title = title;
       else delete fm.title;
       if (author) fm.author = author;
@@ -1877,7 +2003,21 @@ export class WeChatPreviewView extends ItemView {
     this.previewRefreshing = true;
     this.updatePreviewRefreshControl();
     try {
-      await this.refreshContent(false);
+      const sourceFile = this.resolvePreviewSourceFile();
+      if (!sourceFile) throw new Error('请先在左侧打开一篇 Markdown 笔记');
+      this.lastActiveMarkdownFile = sourceFile;
+      if (
+        this.file?.path !== sourceFile.path
+        || this.snapshot?.sourcePath !== sourceFile.path
+      ) {
+        await this.setFile(sourceFile);
+      } else {
+        await this.refreshContent(false);
+      }
+      if (
+        this.file?.path !== sourceFile.path
+        || this.snapshot?.sourcePath !== sourceFile.path
+      ) throw new Error('左侧文件已发生变化，请再次刷新');
       if (this.error) throw new Error(this.error);
       new Notice('预览已刷新。');
     } catch (error) {
